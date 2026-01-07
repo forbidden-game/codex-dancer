@@ -39,16 +39,20 @@ const colors = {
   error: RGBA.fromInts(224, 108, 117),
   warning: RGBA.fromInts(245, 167, 66),
   info: RGBA.fromInts(86, 182, 194),
-  panel: RGBA.fromInts(20, 20, 20),
+  panel: RGBA.fromInts(10, 10, 10),
+  panelRaised: RGBA.fromInts(20, 20, 20),
+  panelInner: RGBA.fromInts(30, 30, 30),
+  panelHighlight: RGBA.fromInts(40, 40, 40),
   border: RGBA.fromInts(72, 72, 72),
+  borderActive: RGBA.fromInts(96, 96, 96),
   userBg: RGBA.fromInts(30, 30, 30),
   assistantBg: RGBA.fromInts(40, 40, 40),
   panelHeaderBg: RGBA.fromInts(20, 20, 20),
-  workerPendingBg: RGBA.fromInts(30, 30, 30),
-  workerRunningBg: RGBA.fromInts(40, 40, 40),
-  workerOkBg: RGBA.fromInts(40, 40, 40),
-  workerErrorBg: RGBA.fromInts(40, 40, 40),
-  workerTimeoutBg: RGBA.fromInts(40, 40, 40),
+  workerPendingBg: RGBA.fromInts(20, 20, 20),
+  workerRunningBg: RGBA.fromInts(30, 30, 30),
+  workerOkBg: RGBA.fromInts(32, 48, 59),
+  workerErrorBg: RGBA.fromInts(55, 34, 44),
+  workerTimeoutBg: RGBA.fromInts(45, 31, 38),
 }
 
 function statusColor(status: WorkerStatus) {
@@ -212,7 +216,12 @@ function App() {
   })
 
   return (
-    <box flexDirection="column" width={dimensions().width} height={dimensions().height}>
+    <box
+      flexDirection="column"
+      width={dimensions().width}
+      height={dimensions().height}
+      backgroundColor={colors.panel}
+    >
       <box
         paddingLeft={2}
         paddingRight={2}
@@ -228,8 +237,14 @@ function App() {
           <text fg={colors.muted}>  * {phase()}</text>
         </Show>
       </box>
-      <box flexDirection="row" flexGrow={1}>
-        <box flexDirection="column" flexGrow={1} paddingLeft={2} paddingRight={2}>
+      <box flexDirection="row" flexGrow={1} backgroundColor={colors.panel}>
+        <box
+          flexDirection="column"
+          flexGrow={1}
+          paddingLeft={2}
+          paddingRight={2}
+          backgroundColor={colors.panel}
+        >
           <box paddingTop={1} paddingBottom={1} flexShrink={0}>
             <text fg={colors.muted}>main</text>
             <Show when={running()}>
@@ -277,6 +292,7 @@ function App() {
           paddingRight={2}
           border={["left"]}
           borderColor={colors.border}
+          backgroundColor={colors.panelRaised}
         >
           <box paddingTop={1} paddingBottom={1} flexShrink={0} backgroundColor={colors.panelHeaderBg}>
             <text fg={colors.primary} attributes={TextAttributes.BOLD}>
