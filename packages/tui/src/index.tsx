@@ -37,6 +37,7 @@ const colors = {
   warning: RGBA.fromInts(234, 179, 8),
   info: RGBA.fromInts(56, 189, 248),
   panel: RGBA.fromInts(17, 24, 39),
+  border: RGBA.fromInts(30, 41, 59),
 }
 
 function statusColor(status: WorkerStatus) {
@@ -117,6 +118,7 @@ async function runOrchestrator(prompt: string, onEvent: (event: OrchestratorEven
 function App() {
   const [messages, setMessages] = createSignal<Message[]>([])
   const [workers, setWorkers] = createSignal<WorkerItem[]>([])
+  const [workerLog, setWorkerLog] = createSignal<string[]>([])
   const [phase, setPhase] = createSignal<string>("idle")
   const [running, setRunning] = createSignal(false)
   const dimensions = useTerminalDimensions()
@@ -126,30 +128,44 @@ function App() {
     setWorkers((prev) => prev.map((item) => (item.id === id ? updater(item) : item)))
   }
 
+  const appendLog = (line: string) => {
+    setWorkerLog((prev) => {
+      const next = [...prev, line]
+      return next.slice(-200)
+    })
+  }
+
   const handleEvent = (event: OrchestratorEvent) => {
     if (event.type === "run_start") {
       setPhase("plan")
       setWorkers([])
+      setWorkerLog([])
+      appendLog("[main] start")
       return
     }
     if (event.type === "main_start" && event.phase) {
       setPhase(event.phase)
+      appendLog(`[main] ${event.phase}`)
       return
     }
     if (event.type === "tasks_planned" && event.tasks) {
       setWorkers(event.tasks.map((task) => ({ id: task.id, title: task.title, scope: task.scope, status: "pending" })))
+      appendLog(`[main] planned ${event.tasks.length} worker(s)`)
       return
     }
     if (event.type === "worker_start" && event.worker_id) {
       updateWorker(event.worker_id, (item) => ({ ...item, status: "running" }))
+      appendLog(`[worker ${event.worker_id}] start`)
       return
     }
     if (event.type === "worker_end" && event.worker_id && event.status) {
       updateWorker(event.worker_id, (item) => ({ ...item, status: event.status ?? item.status }))
+      appendLog(`[worker ${event.worker_id}] ${event.status}`)
       return
     }
     if (event.type === "run_end") {
       setPhase("idle")
+      appendLog("[main] done")
       return
     }
   }
@@ -178,7 +194,14 @@ function App() {
 
   return (
     <box flexDirection="column" width={dimensions().width} height={dimensions().height}>
-      <box paddingLeft={2} paddingRight={2} paddingTop={1} paddingBottom={1} backgroundColor={colors.panel}>
+      <box
+        paddingLeft={2}
+        paddingRight={2}
+        paddingTop={1}
+        paddingBottom={1}
+        backgroundColor={colors.panel}
+        flexShrink={0}
+      >
         <text fg={colors.text} attributes={TextAttributes.BOLD}>
           codex-orch
         </text>
@@ -186,46 +209,80 @@ function App() {
           <text fg={colors.muted}>  * {phase()}</text>
         </Show>
       </box>
-      <box flexDirection="column" flexGrow={1}>
-        <scrollbox flexGrow={1} paddingLeft={2} paddingRight={2}>
-          <For each={messages()}>
-            {(msg) => (
-              <box flexDirection="row" gap={1} marginBottom={1}>
-                <text fg={colors.muted}>
-                  {msg.role === "user" ? "you" : "assistant"}
-                </text>
-                <text fg={colors.text} wrapMode="word">
-                  {msg.text}
-                </text>
-              </box>
-            )}
-          </For>
-        </scrollbox>
-        <box paddingLeft={2} paddingRight={2} paddingTop={1} paddingBottom={1} flexDirection="row" gap={1}>
-          <Show when={workers().length > 0} fallback={<text fg={colors.muted}>No workers</text>}>
-            <For each={workers()}>
-              {(worker) => (
-                <box flexDirection="row" gap={1} marginRight={2}>
-                  <text fg={statusColor(worker.status)}>{statusSymbol(worker.status)}</text>
-                  <text fg={colors.text} wrapMode="none">
-                    {worker.title}
+      <box flexDirection="row" flexGrow={1}>
+        <box flexDirection="column" flexGrow={1} paddingLeft={2} paddingRight={2}>
+          <box paddingTop={1} paddingBottom={1} flexShrink={0}>
+            <text fg={colors.muted}>main</text>
+            <Show when={running()}>
+              <text fg={colors.muted}>  {phase()}</text>
+            </Show>
+          </box>
+          <scrollbox flexGrow={1}>
+            <For each={messages()}>
+              {(msg) => (
+                <box flexDirection="row" gap={1} marginBottom={1}>
+                  <text fg={colors.muted}>
+                    {msg.role === "user" ? "you" : "assistant"}
+                  </text>
+                  <text fg={colors.text} wrapMode="word">
+                    {msg.text}
                   </text>
                 </box>
               )}
             </For>
-          </Show>
+          </scrollbox>
+          <box paddingTop={1} paddingBottom={1} flexShrink={0}>
+            <textarea
+              height={3}
+              placeholder={running() ? "Running..." : "Type a prompt and press Enter"}
+              textColor={colors.text}
+              focusedTextColor={colors.text}
+              cursorColor={colors.text}
+              onSubmit={submit}
+              keyBindings={[{ name: "return", action: "submit" }]}
+              ref={(val: TextareaRenderable) => (input = val)}
+            />
+          </box>
         </box>
-        <box paddingLeft={2} paddingRight={2} paddingBottom={1}>
-          <textarea
-            height={3}
-            placeholder={running() ? "Running..." : "Type a prompt and press Enter"}
-            textColor={colors.text}
-            focusedTextColor={colors.text}
-            cursorColor={colors.text}
-            onSubmit={submit}
-            keyBindings={[{ name: "return", action: "submit" }]}
-            ref={(val: TextareaRenderable) => (input = val)}
-          />
+        <box
+          width={36}
+          flexDirection="column"
+          paddingLeft={2}
+          paddingRight={2}
+          border={["left"]}
+          borderColor={colors.border}
+        >
+          <box paddingTop={1} paddingBottom={1} flexShrink={0}>
+            <text fg={colors.text} attributes={TextAttributes.BOLD}>
+              workers
+            </text>
+          </box>
+          <scrollbox flexGrow={1}>
+            <Show when={workers().length > 0} fallback={<text fg={colors.muted}>no workers</text>}>
+              <For each={workers()}>
+                {(worker) => (
+                  <box flexDirection="row" gap={1} marginBottom={1}>
+                    <text fg={statusColor(worker.status)}>{statusSymbol(worker.status)}</text>
+                    <text fg={colors.text} wrapMode="none">
+                      {worker.title}
+                    </text>
+                  </box>
+                )}
+              </For>
+            </Show>
+            <Show when={workerLog().length > 0}>
+              <box paddingTop={1} paddingBottom={1} flexShrink={0}>
+                <text fg={colors.muted}>activity</text>
+              </box>
+              <For each={workerLog()}>
+                {(line) => (
+                  <text fg={colors.muted} wrapMode="none">
+                    {line}
+                  </text>
+                )}
+              </For>
+            </Show>
+          </scrollbox>
         </box>
       </box>
     </box>
