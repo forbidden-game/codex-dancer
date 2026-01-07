@@ -36,10 +36,14 @@ REPL 内置命令：
 - `--use-last-session`：使用 `codex exec resume --last`
 - `--events-file`：输出 JSONL 事件流到文件
 - `--events-append`：事件流追加写入
+- `--events-stdout`：输出 JSONL 事件流到 stdout
+- `--events-stdout-only`：事件流输出到 stdout，summary 输出到 stderr
 
 ## 事件流（JSONL）
 
-启用 `--events-file` 后会输出以下事件类型（每行一条 JSON）：
+事件 Schema：`schemas/codex_orch_events.schema.json`
+
+启用 `--events-file` 或 `--events-stdout` 后会输出以下事件类型（每行一条 JSON）：
 - `run_start` / `run_end`
 - `main_start` / `main_end`（phase: plan | plan_repair | synthesize）
 - `tasks_planned`
@@ -47,6 +51,6 @@ REPL 内置命令：
 
 示例（仅展示结构）：
 ```json
-{"type":"worker_start","worker_id":"1","title":"Task 1","scope":"read-only","ts":1700000000.0}
-{"type":"worker_end","worker_id":"1","status":"ok","exit_code":0,"ts":1700000001.2}
+{"type":"worker_start","schema_version":"v1","run_id":"...","worker_id":"1","title":"Task 1","scope":"read-only","ts":1700000000.0}
+{"type":"worker_end","schema_version":"v1","run_id":"...","worker_id":"1","status":"ok","exit_code":0,"ts":1700000001.2}
 ```

@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Codex Orchestrator Event",
+  "type": "object",
+  "required": ["type", "ts", "run_id", "schema_version"],
+  "additionalProperties": true,
+  "properties": {
+    "schema_version": {"const": "v1"},
+    "type": {
+      "enum": [
+        "run_start",
+        "run_end",
+        "main_start",
+        "main_end",
+        "tasks_planned",
+        "worker_start",
+        "worker_end"
+      ]
+    },
+    "ts": {"type": "number"},
+    "run_id": {"type": "string"},
+    "session_id": {"type": ["string", "null"]},
+    "request": {"type": "string"},
+    "phase": {"enum": ["plan", "plan_repair", "synthesize"]},
+    "worker_id": {"type": "string"},
+    "title": {"type": "string"},
+    "scope": {"enum": ["read-only", "write"]},
+    "status": {"enum": ["ok", "error", "timeout"]},
+    "exit_code": {"type": "integer"},
+    "count": {"type": "integer"},
+    "tasks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "title", "scope"],
+        "additionalProperties": true,
+        "properties": {
+          "id": {"type": "string"},
+          "title": {"type": "string"},
+          "scope": {"enum": ["read-only", "write"]}
+        }
+      }
+    }
+  },
+  "oneOf": [
+    {"properties": {"type": {"const": "run_start"}}, "required": ["request"]},
+    {"properties": {"type": {"const": "run_end"}}, "required": ["session_id"]},
+    {"properties": {"type": {"const": "main_start"}}, "required": ["phase"]},
+    {"properties": {"type": {"const": "main_end"}}, "required": ["phase", "session_id"]},
+    {"properties": {"type": {"const": "tasks_planned"}}, "required": ["count", "tasks"]},
+    {"properties": {"type": {"const": "worker_start"}}, "required": ["worker_id", "title", "scope"]},
+    {"properties": {"type": {"const": "worker_end"}}, "required": ["worker_id", "status"]}
+  ]
+}

@@ -6,9 +6,12 @@ import sys
 import tempfile
 import textwrap
 import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
+
+EVENT_SCHEMA_VERSION = "v1"
 
 
 @dataclass
@@ -21,19 +24,23 @@ class Task:
 
 @dataclass
 class EventSink:
-    path: Optional[Path]
+    streams: List[Any]
     lock: asyncio.Lock
-    fp: Optional[Any]
+    run_id: Optional[str] = None
 
     async def emit(self, event: Dict[str, Any]) -> None:
-        if not self.fp:
+        if not self.streams:
             return
         payload = dict(event)
         payload.setdefault("ts", time.time())
+        payload.setdefault("schema_version", EVENT_SCHEMA_VERSION)
+        if self.run_id:
+            payload.setdefault("run_id", self.run_id)
         line = json.dumps(payload, ensure_ascii=False)
         async with self.lock:
-            self.fp.write(line + "\n")
-            self.fp.flush()
+            for stream in self.streams:
+                stream.write(line + "\n")
+                stream.flush()
 
 
 def _strip_code_fences(text: str) -> str:
@@ -196,7 +203,11 @@ async def _run_worker(
                 "scope": task.scope,
             }
         )
-        proc = await asyncio.create_subprocess_exec(*cmd)
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
         try:
             if timeout_s is None:
                 await proc.wait()
@@ -378,6 +389,8 @@ async def _run_once(
     session_id: Optional[str],
     event_sink: EventSink,
 ) -> Tuple[str, Optional[str]]:
+    run_id = str(uuid.uuid4())
+    event_sink.run_id = run_id
     await event_sink.emit({"type": "run_start", "request": user_request})
     plan_prompt = _build_main_plan_prompt(user_request)
     plan_text, session_id = await _run_main(args, plan_prompt, session_id, event_sink, "plan")
@@ -439,18 +452,25 @@ async def _run_once(
             "session_id": session_id,
         }
     )
+    event_sink.run_id = None
     return final_text, session_id
 
 
 async def _run_all(args: argparse.Namespace) -> int:
     session_path = Path(args.session_file).resolve() if args.session_file else None
     session_id = _load_session_id(session_path)
+    if args.events_stdout_only:
+        args.events_stdout = True
+    event_streams: List[Any] = []
     event_fp = None
     if args.events_file:
         events_path = Path(args.events_file).resolve()
         mode = "a" if args.events_append else "w"
         event_fp = events_path.open(mode, encoding="utf-8")
-    event_sink = EventSink(path=Path(args.events_file).resolve() if args.events_file else None, lock=asyncio.Lock(), fp=event_fp)
+        event_streams.append(event_fp)
+    if args.events_stdout:
+        event_streams.append(sys.stdout)
+    event_sink = EventSink(streams=event_streams, lock=asyncio.Lock())
 
     if not args.repl:
         if not args.prompt:
@@ -458,7 +478,8 @@ async def _run_all(args: argparse.Namespace) -> int:
         summary_text, session_id = await _run_once(args, args.prompt, session_id, event_sink)
         if args.output:
             Path(args.output).write_text(summary_text, encoding="utf-8")
-        sys.stdout.write(summary_text + "\n")
+        output_stream = sys.stderr if args.events_stdout_only else sys.stdout
+        output_stream.write(summary_text + "\n")
         _save_session_id(session_path, session_id)
         if event_fp:
             event_fp.close()
@@ -480,7 +501,8 @@ async def _run_all(args: argparse.Namespace) -> int:
             continue
 
         summary_text, session_id = await _run_once(args, user_input, session_id, event_sink)
-        sys.stdout.write(summary_text + "\n")
+        output_stream = sys.stderr if args.events_stdout_only else sys.stdout
+        output_stream.write(summary_text + "\n")
         _save_session_id(session_path, session_id)
 
     if event_fp:
@@ -499,6 +521,8 @@ def main() -> int:
     parser.add_argument("--use-last-session", action="store_true", help="Use codex exec resume --last")
     parser.add_argument("--events-file", default=None, help="Write JSONL events to file")
     parser.add_argument("--events-append", action="store_true", help="Append events instead of truncating")
+    parser.add_argument("--events-stdout", action="store_true", help="Write JSONL events to stdout")
+    parser.add_argument("--events-stdout-only", action="store_true", help="When set, write summary to stderr")
     parser.add_argument("--model", default=None, help="Codex model override")
     parser.add_argument("--profile", default=None, help="Codex profile override")
     parser.add_argument("--workdir", default=None, help="Working directory for Codex runs")
