@@ -30,22 +30,25 @@ type OrchestratorEvent = {
 }
 
 const colors = {
-  text: RGBA.fromInts(229, 231, 235),
-  muted: RGBA.fromInts(156, 163, 175),
-  success: RGBA.fromInts(34, 197, 94),
-  error: RGBA.fromInts(239, 68, 68),
-  warning: RGBA.fromInts(234, 179, 8),
-  info: RGBA.fromInts(56, 189, 248),
-  panel: RGBA.fromInts(17, 24, 39),
-  border: RGBA.fromInts(30, 41, 59),
-  userBg: RGBA.fromInts(30, 64, 175),
-  assistantBg: RGBA.fromInts(55, 48, 163),
-  panelHeaderBg: RGBA.fromInts(15, 23, 42),
-  workerPendingBg: RGBA.fromInts(17, 24, 39),
-  workerRunningBg: RGBA.fromInts(12, 74, 110),
-  workerOkBg: RGBA.fromInts(20, 83, 45),
-  workerErrorBg: RGBA.fromInts(127, 29, 29),
-  workerTimeoutBg: RGBA.fromInts(120, 53, 15),
+  primary: RGBA.fromInts(250, 178, 131),
+  secondary: RGBA.fromInts(92, 156, 245),
+  accent: RGBA.fromInts(157, 124, 216),
+  text: RGBA.fromInts(238, 238, 238),
+  muted: RGBA.fromInts(128, 128, 128),
+  success: RGBA.fromInts(127, 216, 143),
+  error: RGBA.fromInts(224, 108, 117),
+  warning: RGBA.fromInts(245, 167, 66),
+  info: RGBA.fromInts(86, 182, 194),
+  panel: RGBA.fromInts(20, 20, 20),
+  border: RGBA.fromInts(72, 72, 72),
+  userBg: RGBA.fromInts(30, 30, 30),
+  assistantBg: RGBA.fromInts(40, 40, 40),
+  panelHeaderBg: RGBA.fromInts(20, 20, 20),
+  workerPendingBg: RGBA.fromInts(30, 30, 30),
+  workerRunningBg: RGBA.fromInts(40, 40, 40),
+  workerOkBg: RGBA.fromInts(40, 40, 40),
+  workerErrorBg: RGBA.fromInts(40, 40, 40),
+  workerTimeoutBg: RGBA.fromInts(40, 40, 40),
 }
 
 function statusColor(status: WorkerStatus) {
@@ -244,7 +247,7 @@ function App() {
                   paddingRight={1}
                   backgroundColor={msg.role === "user" ? colors.userBg : colors.assistantBg}
                 >
-                  <text fg={colors.text} attributes={TextAttributes.BOLD}>
+                  <text fg={msg.role === "user" ? colors.secondary : colors.primary} attributes={TextAttributes.BOLD}>
                     {msg.role === "user" ? "Xiezhao" : "codex-dancer"}
                   </text>
                   <text fg={colors.text} wrapMode="word">
@@ -276,7 +279,7 @@ function App() {
           borderColor={colors.border}
         >
           <box paddingTop={1} paddingBottom={1} flexShrink={0} backgroundColor={colors.panelHeaderBg}>
-            <text fg={colors.text} attributes={TextAttributes.BOLD}>
+            <text fg={colors.primary} attributes={TextAttributes.BOLD}>
               workers
             </text>
           </box>
