@@ -38,6 +38,14 @@ const colors = {
   info: RGBA.fromInts(56, 189, 248),
   panel: RGBA.fromInts(17, 24, 39),
   border: RGBA.fromInts(30, 41, 59),
+  userBg: RGBA.fromInts(30, 64, 175),
+  assistantBg: RGBA.fromInts(55, 48, 163),
+  panelHeaderBg: RGBA.fromInts(15, 23, 42),
+  workerPendingBg: RGBA.fromInts(17, 24, 39),
+  workerRunningBg: RGBA.fromInts(12, 74, 110),
+  workerOkBg: RGBA.fromInts(20, 83, 45),
+  workerErrorBg: RGBA.fromInts(127, 29, 29),
+  workerTimeoutBg: RGBA.fromInts(120, 53, 15),
 }
 
 function statusColor(status: WorkerStatus) {
@@ -54,6 +62,14 @@ function statusSymbol(status: WorkerStatus) {
   if (status === "error") return "x"
   if (status === "timeout") return "!"
   return "."
+}
+
+function statusBg(status: WorkerStatus) {
+  if (status === "running") return colors.workerRunningBg
+  if (status === "ok") return colors.workerOkBg
+  if (status === "error") return colors.workerErrorBg
+  if (status === "timeout") return colors.workerTimeoutBg
+  return colors.workerPendingBg
 }
 
 async function readLines(stream: ReadableStream<Uint8Array>, onLine: (line: string) => void) {
@@ -199,7 +215,7 @@ function App() {
         paddingRight={2}
         paddingTop={1}
         paddingBottom={1}
-        backgroundColor={colors.panel}
+        backgroundColor={colors.panelHeaderBg}
         flexShrink={0}
       >
         <text fg={colors.text} attributes={TextAttributes.BOLD}>
@@ -220,9 +236,16 @@ function App() {
           <scrollbox flexGrow={1}>
             <For each={messages()}>
               {(msg) => (
-                <box flexDirection="row" gap={1} marginBottom={1}>
-                  <text fg={colors.muted}>
-                    {msg.role === "user" ? "you" : "assistant"}
+                <box
+                  flexDirection="row"
+                  gap={1}
+                  marginBottom={1}
+                  paddingLeft={1}
+                  paddingRight={1}
+                  backgroundColor={msg.role === "user" ? colors.userBg : colors.assistantBg}
+                >
+                  <text fg={colors.text} attributes={TextAttributes.BOLD}>
+                    {msg.role === "user" ? "Xiezhao" : "codex-dancer"}
                   </text>
                   <text fg={colors.text} wrapMode="word">
                     {msg.text}
@@ -252,7 +275,7 @@ function App() {
           border={["left"]}
           borderColor={colors.border}
         >
-          <box paddingTop={1} paddingBottom={1} flexShrink={0}>
+          <box paddingTop={1} paddingBottom={1} flexShrink={0} backgroundColor={colors.panelHeaderBg}>
             <text fg={colors.text} attributes={TextAttributes.BOLD}>
               workers
             </text>
@@ -261,7 +284,7 @@ function App() {
             <Show when={workers().length > 0} fallback={<text fg={colors.muted}>no workers</text>}>
               <For each={workers()}>
                 {(worker) => (
-                  <box flexDirection="row" gap={1} marginBottom={1}>
+                  <box flexDirection="row" gap={1} marginBottom={1} paddingLeft={1} backgroundColor={statusBg(worker.status)}>
                     <text fg={statusColor(worker.status)}>{statusSymbol(worker.status)}</text>
                     <text fg={colors.text} wrapMode="none">
                       {worker.title}
