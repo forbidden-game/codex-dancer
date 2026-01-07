@@ -1,0 +1,3 @@
+node_modules/
+packages/tui/dist/
+.DS_Store
