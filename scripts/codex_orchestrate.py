@@ -5,9 +5,10 @@ import json
 import sys
 import tempfile
 import textwrap
+import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 
 @dataclass
@@ -16,6 +17,23 @@ class Task:
     title: str
     prompt: str
     scope: str
+
+
+@dataclass
+class EventSink:
+    path: Optional[Path]
+    lock: asyncio.Lock
+    fp: Optional[Any]
+
+    async def emit(self, event: Dict[str, Any]) -> None:
+        if not self.fp:
+            return
+        payload = dict(event)
+        payload.setdefault("ts", time.time())
+        line = json.dumps(payload, ensure_ascii=False)
+        async with self.lock:
+            self.fp.write(line + "\n")
+            self.fp.flush()
 
 
 def _strip_code_fences(text: str) -> str:
@@ -57,25 +75,6 @@ def _normalize_tasks(payload: Any, fallback_prompt: str, max_tasks: int) -> List
     return tasks
 
 
-def _build_planner_prompt(user_request: str, max_tasks: int) -> str:
-    return textwrap.dedent(
-        f"""
-        You are a planner. Produce a JSON object with a single key \"tasks\".
-        Each task must be an object with: id, title, prompt, scope.
-        - id: short string
-        - title: short summary
-        - prompt: instructions for a worker agent
-        - scope: one of \"read-only\" or \"write\"
-        Constraints:
-        - Max tasks: {max_tasks}
-        - Keep prompts concise and actionable
-        - Return ONLY valid JSON, no Markdown
-        User request:
-        {user_request}
-        """
-    ).strip()
-
-
 def _build_worker_prompt(task: Task, user_request: str) -> str:
     return textwrap.dedent(
         f"""
@@ -90,49 +89,37 @@ def _build_worker_prompt(task: Task, user_request: str) -> str:
     ).strip()
 
 
-def _build_summarizer_prompt(user_request: str, worker_outputs: List[str]) -> str:
+def _build_main_plan_prompt(user_request: str) -> str:
+    return textwrap.dedent(
+        f"""
+        You are the main orchestrator. Do not execute tasks directly.
+        Phase: PLAN
+        - Produce a JSON object with key "tasks".
+        - Each task must include: id, title, prompt, scope.
+        - scope must be one of "read-only" or "write".
+        - Return ONLY valid JSON, no Markdown.
+        User request:
+        {user_request}
+        """
+    ).strip()
+
+
+def _build_main_synthesis_prompt(user_request: str, worker_outputs: List[str]) -> str:
     joined = "\n\n".join(
         f"[Worker {idx+1}]\n{output}" for idx, output in enumerate(worker_outputs)
     )
     return textwrap.dedent(
         f"""
-        You are the orchestrator. Synthesize the workers' outputs into a single response.
+        You are the main orchestrator. Use the workers' outputs to answer the user.
+        Phase: SYNTHESIZE
         Requirements:
-        - Start with a direct conclusion
-        - List key reasoning briefly
-        - Provide concrete next steps
-        - Resolve conflicts between workers if any
+        - Start with a direct conclusion.
+        - Provide brief reasoning.
+        - Provide concrete next steps if applicable.
         User request:
         {user_request}
         Worker outputs:
         {joined}
-        """
-    ).strip()
-
-
-def _format_history(history: List[Dict[str, str]], max_turns: int) -> str:
-    if max_turns <= 0:
-        return ""
-    trimmed = history[-max_turns * 2 :]
-    lines: List[str] = []
-    for item in trimmed:
-        role = item.get("role", "user")
-        content = item.get("content", "")
-        lines.append(f"{role.upper()}: {content}")
-    return "\n".join(lines).strip()
-
-
-def _compose_request(user_input: str, history: List[Dict[str, str]], max_turns: int) -> str:
-    history_text = _format_history(history, max_turns)
-    if not history_text:
-        return user_input
-    return textwrap.dedent(
-        f"""
-        Conversation history:
-        {history_text}
-
-        Current user request:
-        {user_input}
         """
     ).strip()
 
@@ -158,6 +145,34 @@ def _build_codex_cmd(
     return cmd
 
 
+def _build_codex_resume_cmd(
+    session_id: Optional[str],
+    prompt: str,
+    output_path: Path,
+    model: Optional[str],
+    codex_args: List[str],
+) -> List[str]:
+    cmd = [
+        "codex",
+        "exec",
+        "resume",
+        "--output-last-message",
+        str(output_path),
+        "--skip-git-repo-check",
+        "--json",
+    ]
+    if model:
+        cmd += ["-m", model]
+    if codex_args:
+        cmd += codex_args
+    if session_id:
+        cmd.append(session_id)
+    else:
+        cmd.append("--last")
+    cmd.append(prompt)
+    return cmd
+
+
 async def _run_worker(
     task: Task,
     user_request: str,
@@ -168,10 +183,19 @@ async def _run_worker(
     workdir: Optional[Path],
     timeout_s: Optional[int],
     semaphore: asyncio.Semaphore,
+    event_sink: EventSink,
 ) -> None:
     prompt = _build_worker_prompt(task, user_request)
     cmd = _build_codex_cmd(prompt, output_path, model, profile, codex_args, workdir)
     async with semaphore:
+        await event_sink.emit(
+            {
+                "type": "worker_start",
+                "worker_id": task.task_id,
+                "title": task.title,
+                "scope": task.scope,
+            }
+        )
         proc = await asyncio.create_subprocess_exec(*cmd)
         try:
             if timeout_s is None:
@@ -181,6 +205,23 @@ async def _run_worker(
         except asyncio.TimeoutError:
             proc.kill()
             await proc.wait()
+            await event_sink.emit(
+                {
+                    "type": "worker_end",
+                    "worker_id": task.task_id,
+                    "status": "timeout",
+                }
+            )
+            return
+        status = "ok" if proc.returncode == 0 else "error"
+        await event_sink.emit(
+            {
+                "type": "worker_end",
+                "worker_id": task.task_id,
+                "status": status,
+                "exit_code": proc.returncode,
+            }
+        )
 
 
 def _read_output(path: Path) -> str:
@@ -189,40 +230,187 @@ def _read_output(path: Path) -> str:
     return path.read_text(encoding="utf-8", errors="replace").strip()
 
 
-async def _run_codex(cmd: List[str]) -> int:
-    proc = await asyncio.create_subprocess_exec(*cmd)
+def _extract_session_id(events: Iterable[Dict[str, Any]]) -> Optional[str]:
+    def walk(value: Any) -> Optional[str]:
+        if isinstance(value, dict):
+            for key, item in value.items():
+                if key in {"session_id", "sessionId"} and isinstance(item, str):
+                    return item
+                found = walk(item)
+                if found:
+                    return found
+        elif isinstance(value, list):
+            for item in value:
+                found = walk(item)
+                if found:
+                    return found
+        return None
+
+    for event in events:
+        found = walk(event)
+        if found:
+            return found
+    return None
+
+
+async def _run_codex_json(cmd: List[str]) -> Tuple[int, List[Dict[str, Any]], str]:
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    events: List[Dict[str, Any]] = []
+    if proc.stdout:
+        async for raw in proc.stdout:
+            line = raw.decode("utf-8", errors="replace").strip()
+            if not line:
+                continue
+            try:
+                events.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    stderr_text = ""
+    if proc.stderr:
+        stderr_text = (await proc.stderr.read()).decode("utf-8", errors="replace")
     code = await proc.wait()
     if code != 0:
-        raise RuntimeError(f"codex exec failed with exit code {code}")
-    return code
+        raise RuntimeError(f"codex exec failed with exit code {code}. {stderr_text.strip()}")
+    return code, events, stderr_text
 
 
-async def _run_once(args: argparse.Namespace, user_request: str) -> str:
-    workdir = Path(args.workdir).resolve() if args.workdir else None
-
+async def _run_main(
+    args: argparse.Namespace,
+    prompt: str,
+    session_id: Optional[str],
+    event_sink: EventSink,
+    phase: str,
+) -> Tuple[str, Optional[str]]:
     with tempfile.TemporaryDirectory(prefix="codex_orchestrate_") as tmpdir:
         tmp_path = Path(tmpdir)
+        output_path = tmp_path / "main.txt"
+        await event_sink.emit({"type": "main_start", "phase": phase})
+        if session_id is None and args.use_last_session:
+            cmd = _build_codex_resume_cmd(
+                None,
+                prompt,
+                output_path,
+                args.model,
+                args.codex_arg,
+            )
+            _, events, _ = await _run_codex_json(cmd)
+            response = _read_output(output_path)
+            session = _extract_session_id(events)
+            await event_sink.emit(
+                {
+                    "type": "main_end",
+                    "phase": phase,
+                    "session_id": session,
+                }
+            )
+            return response, session
 
-        planner_out = tmp_path / "planner.json"
-        planner_prompt = _build_planner_prompt(user_request, args.max_tasks)
-        planner_cmd = _build_codex_cmd(
-            planner_prompt,
-            planner_out,
+        if session_id:
+            cmd = _build_codex_resume_cmd(
+                session_id,
+                prompt,
+                output_path,
+                args.model,
+                args.codex_arg,
+            )
+            _, events, _ = await _run_codex_json(cmd)
+            response = _read_output(output_path)
+            session = _extract_session_id(events) or session_id
+            await event_sink.emit(
+                {
+                    "type": "main_end",
+                    "phase": phase,
+                    "session_id": session,
+                }
+            )
+            return response, session
+
+        workdir = Path(args.workdir).resolve() if args.workdir else None
+        cmd = _build_codex_cmd(
+            prompt,
+            output_path,
             args.model,
             args.profile,
             args.codex_arg,
             workdir,
         )
-        await _run_codex(planner_cmd)
+        cmd.insert(2, "--json")
+        _, events, _ = await _run_codex_json(cmd)
+        response = _read_output(output_path)
+        session = _extract_session_id(events)
+        await event_sink.emit(
+            {
+                "type": "main_end",
+                "phase": phase,
+                "session_id": session,
+            }
+        )
+        return response, session
 
-        planner_raw = _read_output(planner_out)
-        planner_raw = _strip_code_fences(planner_raw)
-        payload = _load_json(planner_raw) or {}
-        tasks = _normalize_tasks(payload, user_request, args.max_tasks)
 
-        semaphore = asyncio.Semaphore(max(1, args.max_workers))
-        worker_jobs = []
-        worker_outputs: List[Path] = []
+def _load_session_id(path: Optional[Path]) -> Optional[str]:
+    if not path or not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return None
+    if isinstance(payload, dict):
+        value = payload.get("session_id")
+        if isinstance(value, str):
+            return value
+    return None
+
+
+def _save_session_id(path: Optional[Path], session_id: Optional[str]) -> None:
+    if not path or not session_id:
+        return
+    path.write_text(json.dumps({"session_id": session_id}), encoding="utf-8")
+
+
+async def _run_once(
+    args: argparse.Namespace,
+    user_request: str,
+    session_id: Optional[str],
+    event_sink: EventSink,
+) -> Tuple[str, Optional[str]]:
+    await event_sink.emit({"type": "run_start", "request": user_request})
+    plan_prompt = _build_main_plan_prompt(user_request)
+    plan_text, session_id = await _run_main(args, plan_prompt, session_id, event_sink, "plan")
+
+    plan_text = _strip_code_fences(plan_text)
+    payload = _load_json(plan_text)
+    if payload is None:
+        repair_prompt = textwrap.dedent(
+            f"""
+            Your previous response was invalid JSON.
+            Return ONLY valid JSON with key "tasks". Do not include Markdown.
+            User request:
+            {user_request}
+            """
+        ).strip()
+        plan_text, session_id = await _run_main(args, repair_prompt, session_id, event_sink, "plan_repair")
+        plan_text = _strip_code_fences(plan_text)
+        payload = _load_json(plan_text) or {}
+
+    tasks = _normalize_tasks(payload, user_request, args.max_tasks)
+    await event_sink.emit(
+        {
+            "type": "tasks_planned",
+            "count": len(tasks),
+            "tasks": [{"id": t.task_id, "title": t.title, "scope": t.scope} for t in tasks],
+        }
+    )
+
+    semaphore = asyncio.Semaphore(max(1, args.max_workers))
+    worker_jobs = []
+    worker_outputs: List[Path] = []
+    with tempfile.TemporaryDirectory(prefix="codex_orchestrate_workers_") as tmpdir:
+        tmp_path = Path(tmpdir)
         for idx, task in enumerate(tasks, start=1):
             out_path = tmp_path / f"worker_{idx}.txt"
             worker_outputs.append(out_path)
@@ -234,50 +422,47 @@ async def _run_once(args: argparse.Namespace, user_request: str) -> str:
                     args.model,
                     args.profile,
                     args.codex_arg,
-                    workdir,
+                    Path(args.workdir).resolve() if args.workdir else None,
                     args.timeout,
                     semaphore,
+                    event_sink,
                 )
             )
-
         await asyncio.gather(*worker_jobs)
-
         worker_texts = [_read_output(p) for p in worker_outputs]
 
-        summary_out = tmp_path / "summary.txt"
-        summary_prompt = _build_summarizer_prompt(user_request, worker_texts)
-        summary_cmd = _build_codex_cmd(
-            summary_prompt,
-            summary_out,
-            args.model,
-            args.profile,
-            args.codex_arg,
-            workdir,
-        )
-        await _run_codex(summary_cmd)
-
-        summary_text = _read_output(summary_out)
-        return summary_text
+    synthesis_prompt = _build_main_synthesis_prompt(user_request, worker_texts)
+    final_text, session_id = await _run_main(args, synthesis_prompt, session_id, event_sink, "synthesize")
+    await event_sink.emit(
+        {
+            "type": "run_end",
+            "session_id": session_id,
+        }
+    )
+    return final_text, session_id
 
 
 async def _run_all(args: argparse.Namespace) -> int:
+    session_path = Path(args.session_file).resolve() if args.session_file else None
+    session_id = _load_session_id(session_path)
+    event_fp = None
+    if args.events_file:
+        events_path = Path(args.events_file).resolve()
+        mode = "a" if args.events_append else "w"
+        event_fp = events_path.open(mode, encoding="utf-8")
+    event_sink = EventSink(path=Path(args.events_file).resolve() if args.events_file else None, lock=asyncio.Lock(), fp=event_fp)
+
     if not args.repl:
         if not args.prompt:
             raise ValueError("prompt is required unless --repl is set")
-        summary_text = await _run_once(args, args.prompt)
+        summary_text, session_id = await _run_once(args, args.prompt, session_id, event_sink)
         if args.output:
             Path(args.output).write_text(summary_text, encoding="utf-8")
         sys.stdout.write(summary_text + "\n")
+        _save_session_id(session_path, session_id)
+        if event_fp:
+            event_fp.close()
         return 0
-
-    history: List[Dict[str, str]] = []
-    if args.history_file:
-        history_path = Path(args.history_file)
-        if history_path.exists():
-            try:
-                history = json.loads(history_path.read_text(encoding="utf-8"))
-            except json.JSONDecodeError:
-                history = []
 
     while True:
         try:
@@ -288,19 +473,18 @@ async def _run_all(args: argparse.Namespace) -> int:
             continue
         if user_input.lower() in {"exit", "quit"}:
             break
-        if user_input.lower() == "/reset":
-            history = []
+        if user_input.lower() == "/reset-session":
+            session_id = None
+            if session_path and session_path.exists():
+                session_path.unlink()
             continue
 
-        history.append({"role": "user", "content": user_input})
-        composed = _compose_request(user_input, history[:-1], args.history_turns)
-        summary_text = await _run_once(args, composed)
+        summary_text, session_id = await _run_once(args, user_input, session_id, event_sink)
         sys.stdout.write(summary_text + "\n")
-        history.append({"role": "assistant", "content": summary_text})
+        _save_session_id(session_path, session_id)
 
-        if args.history_file:
-            Path(args.history_file).write_text(json.dumps(history, ensure_ascii=False), encoding="utf-8")
-
+    if event_fp:
+        event_fp.close()
     return 0
 
 
@@ -311,8 +495,10 @@ def main() -> int:
     parser.add_argument("--max-workers", type=int, default=3, help="Maximum parallel workers")
     parser.add_argument("--timeout", type=int, default=None, help="Timeout seconds per worker")
     parser.add_argument("--repl", action="store_true", help="Run in REPL mode")
-    parser.add_argument("--history-turns", type=int, default=6, help="Number of prior turns to include")
-    parser.add_argument("--history-file", default=None, help="Persist conversation history to file")
+    parser.add_argument("--session-file", default=".codex_orch_session.json", help="Persist main session id")
+    parser.add_argument("--use-last-session", action="store_true", help="Use codex exec resume --last")
+    parser.add_argument("--events-file", default=None, help="Write JSONL events to file")
+    parser.add_argument("--events-append", action="store_true", help="Append events instead of truncating")
     parser.add_argument("--model", default=None, help="Codex model override")
     parser.add_argument("--profile", default=None, help="Codex profile override")
     parser.add_argument("--workdir", default=None, help="Working directory for Codex runs")
