@@ -25,6 +25,8 @@
     "worker_id": {"type": "string"},
     "title": {"type": "string"},
     "scope": {"enum": ["read-only", "write"]},
+    "agent": {"type": "string"},
+    "model": {"type": ["string", "null"]},
     "status": {"enum": ["ok", "error", "timeout"]},
     "exit_code": {"type": "integer"},
     "count": {"type": "integer"},
@@ -37,7 +39,8 @@
         "properties": {
           "id": {"type": "string"},
           "title": {"type": "string"},
-          "scope": {"enum": ["read-only", "write"]}
+          "scope": {"enum": ["read-only", "write"]},
+          "agent": {"type": "string"}
         }
       }
     }

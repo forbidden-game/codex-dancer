@@ -10,6 +10,7 @@ type WorkerItem = {
   id: string
   title: string
   scope: "read-only" | "write"
+  agent: string
   status: WorkerStatus
 }
 
@@ -26,7 +27,9 @@ type OrchestratorEvent = {
   title?: string
   scope?: "read-only" | "write"
   status?: "ok" | "error" | "timeout"
-  tasks?: Array<{ id: string; title: string; scope: "read-only" | "write" }>
+  agent?: string
+  model?: string
+  tasks?: Array<{ id: string; title: string; scope: "read-only" | "write"; agent?: string }>
 }
 
 const colors = {
@@ -172,18 +175,30 @@ function App() {
       return
     }
     if (event.type === "tasks_planned" && event.tasks) {
-      setWorkers(event.tasks.map((task) => ({ id: task.id, title: task.title, scope: task.scope, status: "pending" })))
+      setWorkers(
+        event.tasks.map((task) => ({
+          id: task.id,
+          title: task.title,
+          scope: task.scope,
+          agent: task.agent ?? "general",
+          status: "pending",
+        }))
+      )
       appendLog(`[main] planned ${event.tasks.length} worker(s)`)
       return
     }
     if (event.type === "worker_start" && event.worker_id) {
       updateWorker(event.worker_id, (item) => ({ ...item, status: "running" }))
-      appendLog(`[worker ${event.worker_id}] start`)
+      const agent = event.agent ? `/${event.agent}` : ""
+      const model = event.model ? ` model=${event.model}` : ""
+      appendLog(`[worker ${event.worker_id}${agent}] start${model}`)
       return
     }
     if (event.type === "worker_end" && event.worker_id && event.status) {
       updateWorker(event.worker_id, (item) => ({ ...item, status: event.status ?? item.status }))
-      appendLog(`[worker ${event.worker_id}] ${event.status}`)
+      const agent = event.agent ? `/${event.agent}` : ""
+      const model = event.model ? ` model=${event.model}` : ""
+      appendLog(`[worker ${event.worker_id}${agent}] ${event.status}${model}`)
       return
     }
     if (event.type === "run_end") {
@@ -306,7 +321,7 @@ function App() {
                   <box flexDirection="row" gap={1} marginBottom={1} paddingLeft={1} backgroundColor={statusBg(worker.status)}>
                     <text fg={statusColor(worker.status)}>{statusSymbol(worker.status)}</text>
                     <text fg={colors.text} wrapMode="none">
-                      {worker.title}
+                      [{worker.agent}] {worker.title}
                     </text>
                   </box>
                 )}

@@ -13,6 +13,113 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 EVENT_SCHEMA_VERSION = "v1"
 
+ALLOWED_AGENTS = {
+    "general",
+    "explore",
+    "librarian",
+    "oracle",
+    "frontend",
+    "writer",
+}
+
+ALLOWED_SCOPES = {"read-only", "write"}
+
+AGENT_PLAN_GUIDANCE = {
+    "general": "Default worker for implementation or direct answers.",
+    "explore": "Internal codebase exploration: file search, pattern discovery, locate references.",
+    "librarian": "External references: official docs, standards, OSS examples.",
+    "oracle": "Deep reasoning: architecture, tradeoffs, risks, root cause analysis.",
+    "frontend": "UI/UX, styling, visual design, component structure.",
+    "writer": "Documentation, summaries, release notes, user-facing explanations.",
+}
+
+AGENT_WORKER_GUIDANCE = {
+    "general": textwrap.dedent(
+        """
+        CONTEXT: WORKER
+        ROLE: Generalist worker for execution or direct analysis.
+        RULES:
+        - Do only the assigned task.
+        - Do not spawn other workers.
+        - Prefer concrete evidence over speculation.
+        - If code changes are requested, propose a patch rather than applying it.
+        OUTPUT FORMAT:
+        - Findings (concise bullets)
+        - Evidence (files, commands, or references)
+        - Recommendations (actionable next steps)
+        """
+    ).strip(),
+    "explore": textwrap.dedent(
+        """
+        CONTEXT: WORKER
+        ROLE: Explore agent focused on internal codebase discovery.
+        RULES:
+        - Search the repo for relevant files, symbols, and patterns.
+        - Report file paths and line numbers when possible.
+        - Do not make code changes; gather evidence only.
+        OUTPUT FORMAT:
+        - Findings (what exists, where, why it matters)
+        - Evidence (file paths, commands used, key snippets)
+        - Open Questions (gaps or ambiguities)
+        """
+    ).strip(),
+    "librarian": textwrap.dedent(
+        """
+        CONTEXT: WORKER
+        ROLE: Librarian agent for external references.
+        RULES:
+        - Use official docs or authoritative sources.
+        - Summarize implications for this project.
+        - Do not suggest code edits; focus on guidance and constraints.
+        OUTPUT FORMAT:
+        - Key References (titles or sources)
+        - Guidance (best practices, constraints, gotchas)
+        - Recommendations (how to apply here)
+        """
+    ).strip(),
+    "oracle": textwrap.dedent(
+        """
+        CONTEXT: WORKER
+        ROLE: Oracle agent for deep reasoning and design review.
+        RULES:
+        - Identify risks, tradeoffs, and hidden assumptions.
+        - Provide 1-3 viable approaches with pros/cons.
+        - Avoid implementation details unless necessary.
+        OUTPUT FORMAT:
+        - Diagnosis (core issues, root causes)
+        - Options (with pros/cons)
+        - Recommendation (preferred path and why)
+        """
+    ).strip(),
+    "frontend": textwrap.dedent(
+        """
+        CONTEXT: WORKER
+        ROLE: Frontend/UI/UX specialist.
+        RULES:
+        - Focus on layout, visual hierarchy, spacing, typography, and component structure.
+        - Avoid backend logic unless strictly necessary for UI.
+        - Provide concrete UI guidance or component-level suggestions.
+        OUTPUT FORMAT:
+        - UI Observations
+        - UX Risks
+        - Recommendations (visual + structural)
+        """
+    ).strip(),
+    "writer": textwrap.dedent(
+        """
+        CONTEXT: WORKER
+        ROLE: Documentation and communication specialist.
+        RULES:
+        - Produce clear, user-facing or developer-facing text as requested.
+        - Keep structure scannable and concise.
+        - Avoid speculative statements.
+        OUTPUT FORMAT:
+        - Draft
+        - Notes (assumptions, missing inputs)
+        """
+    ).strip(),
+}
+
 
 @dataclass
 class Task:
@@ -20,6 +127,7 @@ class Task:
     title: str
     prompt: str
     scope: str
+    agent: str
 
 
 @dataclass
@@ -59,6 +167,22 @@ def _load_json(text: str) -> Optional[Dict[str, Any]]:
         return None
 
 
+def _parse_agent_models(values: Iterable[str]) -> Dict[str, str]:
+    result: Dict[str, str] = {}
+    for raw in values:
+        if not raw or "=" not in raw:
+            continue
+        agent_raw, model_raw = raw.split("=", 1)
+        agent = agent_raw.strip().lower()
+        model = model_raw.strip()
+        if not agent or not model:
+            continue
+        if agent not in ALLOWED_AGENTS:
+            continue
+        result[agent] = model
+    return result
+
+
 def _normalize_tasks(payload: Any, fallback_prompt: str, max_tasks: int) -> List[Task]:
     if isinstance(payload, list):
         raw_tasks = payload
@@ -74,37 +198,62 @@ def _normalize_tasks(payload: Any, fallback_prompt: str, max_tasks: int) -> List
         title = str(item.get("title") or f"Task {idx}")
         prompt = str(item.get("prompt") or title)
         scope = str(item.get("scope") or "read-only")
-        tasks.append(Task(task_id=task_id, title=title, prompt=prompt, scope=scope))
+        scope = scope if scope in ALLOWED_SCOPES else "read-only"
+        agent = str(item.get("agent") or "general").strip().lower()
+        if agent not in ALLOWED_AGENTS:
+            agent = "general"
+        tasks.append(Task(task_id=task_id, title=title, prompt=prompt, scope=scope, agent=agent))
         if len(tasks) >= max_tasks:
             break
     if not tasks:
-        tasks.append(Task(task_id="1", title="Main", prompt=fallback_prompt, scope="read-only"))
+        tasks.append(
+            Task(
+                task_id="1",
+                title="Main",
+                prompt=fallback_prompt,
+                scope="read-only",
+                agent="general",
+            )
+        )
     return tasks
 
 
 def _build_worker_prompt(task: Task, user_request: str) -> str:
+    guidance = AGENT_WORKER_GUIDANCE.get(task.agent, AGENT_WORKER_GUIDANCE["general"])
     return textwrap.dedent(
         f"""
-        CONTEXT: WORKER
-        ROLE: You are a sub-agent run by the ORCHESTRATOR. Do only the assigned task.
-        RULES: No extra scope, no other workers.
-        Your final output will be provided back to the ORCHESTRATOR.
+        {guidance}
         TASK: {task.prompt}
         SCOPE: {task.scope}
+        AGENT: {task.agent}
         USER_REQUEST: {user_request}
         """
     ).strip()
 
 
-def _build_main_plan_prompt(user_request: str) -> str:
+def _build_main_plan_prompt(user_request: str, max_tasks: int) -> str:
+    agent_list = ", ".join(sorted(ALLOWED_AGENTS))
+    agent_lines = "\n".join(
+        f"- {name}: {desc}" for name, desc in sorted(AGENT_PLAN_GUIDANCE.items())
+    )
     return textwrap.dedent(
         f"""
         You are the main orchestrator. Do not execute tasks directly.
         Phase: PLAN
         - Produce a JSON object with key "tasks".
-        - Each task must include: id, title, prompt, scope.
+        - Each task must include: id, title, prompt, scope, agent.
         - scope must be one of "read-only" or "write".
+        - agent must be one of: {agent_list}.
+        - Max tasks: {max_tasks}.
+        - Tasks should be parallel-friendly and non-overlapping.
+        - If the request is complex, include at least one explore task.
+        - If external libraries or standards are involved, include a librarian task.
+        - Use oracle only for deep reasoning or architecture tradeoffs.
+        - Use frontend for visual or UI/UX changes.
+        - Use writer for documentation or user-facing copy.
         - Return ONLY valid JSON, no Markdown.
+        Agent guidance:
+        {agent_lines}
         User request:
         {user_request}
         """
@@ -122,6 +271,8 @@ def _build_main_synthesis_prompt(user_request: str, worker_outputs: List[str]) -
         Requirements:
         - Start with a direct conclusion.
         - Provide brief reasoning.
+        - Reconcile conflicts across worker outputs.
+        - Call out assumptions and gaps.
         - Provide concrete next steps if applicable.
         User request:
         {user_request}
@@ -201,6 +352,8 @@ async def _run_worker(
                 "worker_id": task.task_id,
                 "title": task.title,
                 "scope": task.scope,
+                "agent": task.agent,
+                "model": model,
             }
         )
         proc = await asyncio.create_subprocess_exec(
@@ -221,6 +374,8 @@ async def _run_worker(
                     "type": "worker_end",
                     "worker_id": task.task_id,
                     "status": "timeout",
+                    "agent": task.agent,
+                    "model": model,
                 }
             )
             return
@@ -231,6 +386,8 @@ async def _run_worker(
                 "worker_id": task.task_id,
                 "status": status,
                 "exit_code": proc.returncode,
+                "agent": task.agent,
+                "model": model,
             }
         )
 
@@ -295,6 +452,7 @@ async def _run_main(
     session_id: Optional[str],
     event_sink: EventSink,
     phase: str,
+    model: Optional[str],
 ) -> Tuple[str, Optional[str]]:
     with tempfile.TemporaryDirectory(prefix="codex_orchestrate_") as tmpdir:
         tmp_path = Path(tmpdir)
@@ -305,7 +463,7 @@ async def _run_main(
                 None,
                 prompt,
                 output_path,
-                args.model,
+                model,
                 args.codex_arg,
             )
             _, events, _ = await _run_codex_json(cmd)
@@ -325,7 +483,7 @@ async def _run_main(
                 session_id,
                 prompt,
                 output_path,
-                args.model,
+                model,
                 args.codex_arg,
             )
             _, events, _ = await _run_codex_json(cmd)
@@ -344,7 +502,7 @@ async def _run_main(
         cmd = _build_codex_cmd(
             prompt,
             output_path,
-            args.model,
+            model,
             args.profile,
             args.codex_arg,
             workdir,
@@ -392,8 +550,19 @@ async def _run_once(
     run_id = str(uuid.uuid4())
     event_sink.run_id = run_id
     await event_sink.emit({"type": "run_start", "request": user_request})
-    plan_prompt = _build_main_plan_prompt(user_request)
-    plan_text, session_id = await _run_main(args, plan_prompt, session_id, event_sink, "plan")
+    main_model = args.main_model or args.model
+    worker_default_model = args.worker_model or args.model
+    agent_model_map = _parse_agent_models(args.agent_model)
+
+    plan_prompt = _build_main_plan_prompt(user_request, args.max_tasks)
+    plan_text, session_id = await _run_main(
+        args,
+        plan_prompt,
+        session_id,
+        event_sink,
+        "plan",
+        main_model,
+    )
 
     plan_text = _strip_code_fences(plan_text)
     payload = _load_json(plan_text)
@@ -402,11 +571,19 @@ async def _run_once(
             f"""
             Your previous response was invalid JSON.
             Return ONLY valid JSON with key "tasks". Do not include Markdown.
+            Each task must include: id, title, prompt, scope, agent.
             User request:
             {user_request}
             """
         ).strip()
-        plan_text, session_id = await _run_main(args, repair_prompt, session_id, event_sink, "plan_repair")
+        plan_text, session_id = await _run_main(
+            args,
+            repair_prompt,
+            session_id,
+            event_sink,
+            "plan_repair",
+            main_model,
+        )
         plan_text = _strip_code_fences(plan_text)
         payload = _load_json(plan_text) or {}
 
@@ -415,7 +592,10 @@ async def _run_once(
         {
             "type": "tasks_planned",
             "count": len(tasks),
-            "tasks": [{"id": t.task_id, "title": t.title, "scope": t.scope} for t in tasks],
+            "tasks": [
+                {"id": t.task_id, "title": t.title, "scope": t.scope, "agent": t.agent}
+                for t in tasks
+            ],
         }
     )
 
@@ -427,12 +607,13 @@ async def _run_once(
         for idx, task in enumerate(tasks, start=1):
             out_path = tmp_path / f"worker_{idx}.txt"
             worker_outputs.append(out_path)
+            model = agent_model_map.get(task.agent) or worker_default_model
             worker_jobs.append(
                 _run_worker(
                     task,
                     user_request,
                     out_path,
-                    args.model,
+                    model,
                     args.profile,
                     args.codex_arg,
                     Path(args.workdir).resolve() if args.workdir else None,
@@ -445,7 +626,14 @@ async def _run_once(
         worker_texts = [_read_output(p) for p in worker_outputs]
 
     synthesis_prompt = _build_main_synthesis_prompt(user_request, worker_texts)
-    final_text, session_id = await _run_main(args, synthesis_prompt, session_id, event_sink, "synthesize")
+    final_text, session_id = await _run_main(
+        args,
+        synthesis_prompt,
+        session_id,
+        event_sink,
+        "synthesize",
+        main_model,
+    )
     await event_sink.emit(
         {
             "type": "run_end",
@@ -523,7 +711,15 @@ def main() -> int:
     parser.add_argument("--events-append", action="store_true", help="Append events instead of truncating")
     parser.add_argument("--events-stdout", action="store_true", help="Write JSONL events to stdout")
     parser.add_argument("--events-stdout-only", action="store_true", help="When set, write summary to stderr")
-    parser.add_argument("--model", default=None, help="Codex model override")
+    parser.add_argument("--model", default=None, help="Codex model override (global fallback)")
+    parser.add_argument("--main-model", default=None, help="Model override for main plan/synthesis")
+    parser.add_argument("--worker-model", default=None, help="Default model for workers")
+    parser.add_argument(
+        "--agent-model",
+        action="append",
+        default=[],
+        help="Per-agent model override, format: agent=model (repeatable)",
+    )
     parser.add_argument("--profile", default=None, help="Codex profile override")
     parser.add_argument("--workdir", default=None, help="Working directory for Codex runs")
     parser.add_argument("--codex-arg", action="append", default=[], help="Extra arg for codex exec")

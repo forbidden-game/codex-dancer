@@ -28,6 +28,9 @@ REPL 内置命令：
 ### 常用参数
 
 - `--model`：指定模型
+- `--main-model`：主会话（plan/synthesize）模型
+- `--worker-model`：worker 默认模型
+- `--agent-model`：指定 agent 的模型，格式 `agent=model`，可重复
 - `--profile`：指定 Codex profile
 - `--workdir`：指定工作目录（传给 `codex exec -C`）
 - `--codex-arg`：额外透传参数，示例：`--codex-arg --full-auto`
@@ -38,6 +41,29 @@ REPL 内置命令：
 - `--events-append`：事件流追加写入
 - `--events-stdout`：输出 JSONL 事件流到 stdout
 - `--events-stdout-only`：事件流输出到 stdout，summary 输出到 stderr
+
+## Agent 说明
+
+Plan 阶段输出的每个 task 现在包含 `agent` 字段，用于选择不同的 worker 行为与模型。
+
+可用 agent：
+- `general`：默认执行/分析
+- `explore`：内部代码搜索与模式发现
+- `librarian`：外部文档与标准参考
+- `oracle`：复杂推理与架构权衡
+- `frontend`：UI/UX 与视觉相关
+- `writer`：文档与对外文字
+
+示例：为不同 agent 指定不同模型
+
+```bash
+python3 scripts/codex_orchestrate.py "Review this repo and propose improvements" \
+  --main-model gpt-5.2 \
+  --worker-model gpt-5.1 \
+  --agent-model explore=gpt-5.1 \
+  --agent-model librarian=gpt-5.1 \
+  --agent-model oracle=gpt-5.2
+```
 
 ## 事件流（JSONL）
 
@@ -51,6 +77,6 @@ REPL 内置命令：
 
 示例（仅展示结构）：
 ```json
-{"type":"worker_start","schema_version":"v1","run_id":"...","worker_id":"1","title":"Task 1","scope":"read-only","ts":1700000000.0}
-{"type":"worker_end","schema_version":"v1","run_id":"...","worker_id":"1","status":"ok","exit_code":0,"ts":1700000001.2}
+{"type":"worker_start","schema_version":"v1","run_id":"...","worker_id":"1","title":"Task 1","scope":"read-only","agent":"explore","model":"gpt-5.1","ts":1700000000.0}
+{"type":"worker_end","schema_version":"v1","run_id":"...","worker_id":"1","status":"ok","exit_code":0,"agent":"explore","model":"gpt-5.1","ts":1700000001.2}
 ```
